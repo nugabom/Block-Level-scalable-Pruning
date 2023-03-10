@@ -154,6 +154,8 @@ def app():
         FLAGS = Config(job_yaml_file)
 
         use_colab = True if 'COLAB_GPU' in os.environ else False
+        #FLAGS.scale = float(os.environ["scale"])
+        FLAGS.scale = 0.01
         use = ''     
         if use_colab:
             FLAGS.use_colab = True
@@ -162,12 +164,13 @@ def app():
         use_pretrained = ''
         if getattr(FLAGS, 'pretrained', False):
             use_pretrained = '_P'
-            
+        FLAGS.prunable_id = 0
+        FLAGS.non_prunable_id = 0     
         model = FLAGS.model.split('.')[1]
         if FLAGS.DENSE_TEACHER:
-            FLAGS.log_dir = f"{use}{model}_DH{FLAGS.DH}_07_19_DL{FLAGS.DL}_W{FLAGS.width_mult}_{FLAGS.pruner}_{FLAGS.BS_R}x{FLAGS.BS_C}_T{use_pretrained}"
+            FLAGS.log_dir = f"{use}{model}_02_17_L1_DH{FLAGS.DH}_DL{FLAGS.DL}_W{FLAGS.width_mult}_{FLAGS.pruner}_{FLAGS.BS_R}x{FLAGS.BS_C}_T{use_pretrained}_NEW_PARAM"
         else:
-            FLAGS.log_dir = f"{use}{model}_DH{FLAGS.DH}_07_19_DL{FLAGS.DL}_W{FLAGS.width_mult}_{FLAGS.pruner}_{FLAGS.BS_R}x{FLAGS.BS_C}{use_pretrained}"
+            FLAGS.log_dir = f"{use}{model}_08_13_DH{FLAGS.DH}_DL{FLAGS.DL}_W{FLAGS.width_mult}_{FLAGS.pruner}_{FLAGS.BS_R}x{FLAGS.BS_C}{use_pretrained}"
     
         return FLAGS
     else:
@@ -176,6 +179,6 @@ def app():
 
 
 app()
-print(FLAGS.yaml())
+#print(FLAGS.yaml())
 import time
 exe = time.strftime('%Y-%m-%d_%H-%M-%S')

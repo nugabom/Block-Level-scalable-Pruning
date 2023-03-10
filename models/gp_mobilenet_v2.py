@@ -1,7 +1,7 @@
 import math
 import torch.nn as nn
 
-from .group_level_ops import *
+from .new_group_level_ops import *
 from utils.config import FLAGS
 #from config import FLAGS
 
@@ -27,7 +27,7 @@ class InvertedResidual(nn.Module):
         layers += [
             Conv2d(
                 expand_inp, expand_inp, 3, stride, 1, 
-                ratio=[expand_ratio, expand_ratio]),
+                ratio=[expand_ratio, expand_ratio], groups=expand_inp),
             DynamicGroupBatchNorm2d(expand_inp, ratio=expand_ratio),
 
             nn.ReLU6(inplace=True),
@@ -51,12 +51,14 @@ class InvertedResidual(nn.Module):
 class Model(nn.Module):
     def __init__(self, num_classes=1000, input_size=224):
         super(Model, self).__init__()
+        FLAGS.factor = [112, 112, 56, 56, 56, 56, 28, 28, 28, 28, 28, 28, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 7, 7, 7, 7, 7, 7, 7, 7]
+        FLAGS.factor = [a ** 2//32 + 1 for a in FLAGS.factor]
 
         # setting of inverted residual blocks
         self.block_setting = [
             # t, c, n, s
             [1, 16, 1, 1],
-            [6, 24, 2, 1],
+            [6, 24, 2, 2],
             [6, 32, 3, 2],
             [6, 64, 4, 2],
             [6, 96, 3, 1],
@@ -78,7 +80,7 @@ class Model(nn.Module):
         self.features.append(
             nn.Sequential(
                 Conv2d(
-                    3, channels, 3, 1, 1, bias=False,
+                    3, channels, 3, 2, 1, bias=False,
                     us=[False, True], ratio=[1, 1]),
                 DynamicGroupBatchNorm2d(channels),
                 nn.ReLU6(inplace=True))
@@ -105,8 +107,7 @@ class Model(nn.Module):
                 nn.ReLU6(inplace=True),
             )
         )
-        avg_pool_size = input_size // 8
-        self.features.append(nn.AvgPool2d(avg_pool_size))
+        self.features.append(nn.AdaptiveAvgPool2d(output_size=(1, 1)))
 
         # make it nn.Sequential
         self.features = nn.Sequential(*self.features)
@@ -115,6 +116,12 @@ class Model(nn.Module):
         self.classifier = nn.Sequential(nn.Linear(self.outp, num_classes))
         #if FLAGS.reset_parameters:
         #    self.reset_parameters()
+        
+        idx = 0
+        for layer in self.modules():
+            if isinstance(layer, nn.Conv2d):
+                layer.idx = idx
+                idx += 1
 
     def forward(self, x):
         x = self.features(x)

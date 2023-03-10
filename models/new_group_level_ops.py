@@ -1,5 +1,6 @@
 from einops import repeat, rearrange, reduce
 import math
+import os
 import wandb
 from collections import defaultdict
 from typing import Union
@@ -49,28 +50,20 @@ class Conv2d(nn.Conv2d):
         
         self.in_channels_max = in_channels
         self.out_channels_max = out_channels
-        self.width_mult = None
         self.ratio = ratio
         self.us = us
+        
+        _id = getattr(FLAGS, 'non_prunable_id', 0)
+        self.name = f"conv_non_prunable_{_id}"
+        FLAGS.non_prunable_id += 1
 
     def forward(self, input):
-        if self.us[0]:
-            self.in_channels = make_divisible(
-                self.in_channels_max
-                * self.width_mult
-                / self.ratio[0]) * self.ratio[0]
-
-        if self.us[1]:
-            self.out_channels = make_divisible(
-                self.out_channels_max
-                * self.width_mult
-                / self.ratio[1]) * self.ratio[1]
-
         y = nn.functional.conv2d(
             input, self.weight, self.bias, self.stride, self.padding,
             self.dilation, self.groups)
-
         return y
+
+
 
 
 class DynamicGroupConv2d(nn.Conv2d):
@@ -84,15 +77,17 @@ class DynamicGroupConv2d(nn.Conv2d):
         
         self.in_channels_max = in_channels
         self.out_channels_max = out_channels
-        self.width_mult = None
         self.ratio = ratio
         self.us = us
-
+        
         self.density = None
         self.mask = None
         self.BS_R = int(FLAGS.BS_R)
         self.BS_C = int(FLAGS.BS_C)
-
+        
+        _id = getattr(FLAGS, 'prunable_id', 0)
+        self.name = f"conv_prunable_{_id}"
+        FLAGS.prunable_id += 1
         # HB-level
         #self.dense_in_channels = int(in_channels * 0.25)
         #self.dense_out_channels = int(out_channels * 0.25)
@@ -100,17 +95,6 @@ class DynamicGroupConv2d(nn.Conv2d):
         #self.dense_mask[:self.dense_out_channels, :self.dense_in_channels, :, :] = 1.
 
     def change_mask(self):
-        if self.us[0]:
-            self.in_channels = make_divisible(
-                self.in_channels_max
-                * self.width_mult
-                / self.ratio[0]) * self.ratio[0]
-        if self.us[1]:
-            self.out_channels = make_divisible(
-                self.out_channels_max
-                * self.width_mult
-                / self.ratio[1]) * self.ratio[1]
-
         if self.density == 1.0 or self.density == 0.0:  # Only Channel-level
             self.mask = None
         else:
@@ -131,13 +115,32 @@ class DynamicGroupConv2d(nn.Conv2d):
             ## 1x1 convolution
             #self.mask = block_mask.reshape(self.out_channels_max, self.in_channels_max, 1, 1)
 
+    def change_erk(self):
+        if self.density == 1.0 or self.density == 0.0:  # Only Channel-level
+            self.mask = None
+        else:
+            # HB-level
+            o, i, h, w = self.weight.size()
+            block = self.weight.clone()
+            block_l2 = block.reshape(o // self.BS_R, self.BS_R, (i * h * w) // self.BS_C, self.BS_C, -1).pow(2).mean(dim=(1, 3, 4))
+            q = 100 * (1-self.density) * (1 - (o + i)/(o * i))
+            thresh_val = percentile(block_l2, q)
+
+            self.mask = (block_l2 > thresh_val).type(torch.float)
+            self.mask = repeat(self.mask, 'o (i h w) -> (o r) (i c) h w', r=self.BS_R, c=self.BS_C, h=h, w=w)
+            # HB-level
+            #block_mask[:self.dense_out_channels_max, :self.dense_in_channels_max] = 1.
+
+            ## 1x1 convolution
+            #self.mask = block_mask.reshape(self.out_channels_max, self.in_channels_max, 1, 1)
+
 
     def forward(self, input):
         if self.mask is not None:
             weight = self.weight.cuda() * self.mask.cuda()
         else:
             weight = self.weight
-        #print(f"{self}: {torch.sum((weight == 0.0).int()).item()/weight.numel()}")
+
         y = nn.functional.conv2d(
             input, weight, self.bias, self.stride, self.padding,
             self.dilation, self.groups)
@@ -150,14 +153,12 @@ class DynamicGroupBatchNorm2d(nn.BatchNorm2d):
             num_features, affine=True, track_running_stats=False)
         
         self.ratio = ratio
-        self.width_mult = FLAGS.width_mult
         self.density = None
         self.ignore_model_profiling = True
         self.bn = nn.ModuleList([
             nn.BatchNorm2d(self.num_features, affine=False) for i in FLAGS.density_list])
 
     def forward(self, input):
-
         if self.density in FLAGS.density_list:
             idx = FLAGS.density_list.index(self.density)
             y = nn.functional.batch_norm(
@@ -194,7 +195,7 @@ def log_nnz(m):
             weight = m.weight.data * m.mask.data
             print(f"{m}: {torch.sum((weight == 0.0).int()).item()} ")
 
-def recored_sparsity(model, density, epoch):
+def record_sparsity(model, density, epoch):
     if density == 1.0:
         return
 
@@ -219,7 +220,7 @@ def change_in_mask(model, sparsity, epoch):
     
     idx = 1
     if not f"{sparsity}" in change_in_mask.prev_mask:
-        for layer in model.modules():
+        for layer in models():
             if isinstance(layer, DynamicGroupConv2d):
                 k_size = layer.weight.size(3)
                 mask = layer.mask.data
@@ -228,7 +229,7 @@ def change_in_mask(model, sparsity, epoch):
         return
 
     log = {}
-    for layer in model.modules():
+    for layer in models():
         if isinstance(layer, DynamicGroupConv2d):
             k_size = layer.weight.size(3)
             layer_name = f"conv-{k_size}-{idx}"
@@ -246,10 +247,14 @@ def conv_change_mask(m):
     if isinstance(m, DynamicGroupConv2d):
         m.change_mask()
 
+def conv_change_erk(m):
+    if isinstance(m, DynamicGroupConv2d):
+        m.change_erk()
+
 def global_pruning_update(model, density):
     global_weight_l2 = torch.tensor([]).cuda()
     layer_info = []
-    for layer in model.modules():
+    for layer in models():
         if isinstance(layer, DynamicGroupConv2d):
             if density == 1.0:
                 layer.mask = None
@@ -273,7 +278,7 @@ def global_pruning_update(model, density):
     global_block_mask = (global_weight_l2 > global_threshold).type(torch.float)
     layer_id = 0
     
-    for layer in model.modules():
+    for layer in models():
         if isinstance(layer, DynamicGroupConv2d):
             weight_shape, size = layer_info[layer_id]
             total_size -= size
@@ -298,11 +303,11 @@ def global_normal_pruning_update(model, density):
                 continue
 
             block_weight = layer.weight.clone()
-            block_normal_weight_l2 = block_weight.reshape(layer.out_channels_max//layer.BS_R, layer.BS_R, layer.in_channels_max * block_weight.size(2) * block_weight.size(3)//layer.BS_C, layer.BS_C, -1).pow(2).mean(dim=(1, 3, 4)).view(-1).cuda()
+            block_normal_weight_l2 = block_weight.reshape(layer.out_channels_max//layer.BS_R, layer.BS_R, layer.in_channels_max * block_weight.size(2) * block_weight.size(3)//layer.BS_C, layer.BS_C, -1).abs().mean(dim=(1, 3, 4)).view(-1).cuda()
             sorted_scores, sorted_idx = block_normal_weight_l2.sort(descending=True)
             cumsum = torch.cumsum(sorted_scores, dim=0).cuda()
             #block_normal_weight_l2 = torch.zeros(sorted_scores.shape).cuda()
-            block_normal_weight_l2[sorted_idx] = sorted_scores / cumsum * math.exp(-FLAGS.factor[layer_id] * FLAGS.scale)
+            block_normal_weight_l2[sorted_idx] = sorted_scores / cumsum / FLAGS.factor[layer_id]
             #block_normal_weight_l2[sorted_idx] = sorted_scores / cumsum
             global_normal_weight_l2 = torch.cat([global_normal_weight_l2, block_normal_weight_l2])
             o, i, h, w = layer.weight.size()
@@ -333,13 +338,28 @@ def global_normal_pruning_update(model, density):
             #layer.mask = layer_block_mask.reshape(layer.out_channels_max, layer.in_channels_max, weight_shape[2], weight_shape[3])
             layer_id += 1
 
-def bn_calibration_init(m):
-    """ calculating post-statistics of batch normalization """
-    if getattr(m, 'track_running_stats', False):
-        # reset all values for post-statistics
-        m.reset_running_stats()
-        # set bn in training mode to update post-statistics
-        m.training = True
-        # if use cumulative moving average
-        if getattr(FLAGS, 'cumulative_bn_stats', False):
-            m.momentum = None
+def Pruner(model, pruner_type, density):
+    model.apply(lambda m: setattr(m, 'density', density))
+    if pruner_type == 'LAMP':
+        global_normal_pruning_update(model, density)    
+    elif pruner_type == "global_normal":
+        global_normal_pruning_update(model, density)    
+    elif pruner_type == 'global':
+        global_pruning_update(model, density)
+    elif pruner_type == 'uniform':
+        model.apply(conv_change_mask)
+    elif pruner_type == 'local':
+        model.apply(conv_change_mask)
+    elif pruner_type == 'ERK':
+        model.apply(conv_change_erk)
+    else:
+        raise NotImplementedError(
+            f"Pruner: {pruner_type} is not yet implemented")
+
+def save_weight(file, model, epoch):
+    npz_layers = []
+    for layer in model.modules():
+        if isinstance(layer, DynamicGroupConv2d):
+            weight = layer.weight.cpu().numpy().astype(np.float32)
+            npz_layers.append(weight)
+    np.savez(os.path.join(file, f"layer_weight_{epoch}.npz"), *npz_layers)

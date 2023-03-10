@@ -30,10 +30,10 @@ class DepthwiseSeparableConv(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, num_classes=1000, input_size=224):
+    def __init__(self, num_classes=100, input_size=32):
         super(Model, self).__init__()
 
-        if 'cifar' in FLAGS.dataset:
+        if 'CIFAR100' in FLAGS.dataset:
             first_stride = 1
             downsample = 16
         else:
@@ -41,6 +41,7 @@ class Model(nn.Module):
             downsample = 32
 
         # setting of inverted residual blocks
+        # CIFAR
         self.block_setting = [
             # c, n, s
             [64, 1, 1],
@@ -57,7 +58,7 @@ class Model(nn.Module):
         assert input_size % downsample == 0
         channels = make_divisible(32 * width_mult)
         self.outp = make_divisible(1024 * width_mult)
-        first_stride = 2
+        first_stride = 1
         self.features.append(
             nn.Sequential(
                 Conv2d(
@@ -79,8 +80,7 @@ class Model(nn.Module):
                         DepthwiseSeparableConv(channels, outp, 1))
                 channels = outp
 
-        avg_pool_size = input_size // downsample
-        self.features.append(nn.AvgPool2d(avg_pool_size))
+        self.features.append(nn.AdaptiveAvgPool2d(output_size=(1,1)))
 
         # make it nn.Sequential
         self.features = nn.Sequential(*self.features)
