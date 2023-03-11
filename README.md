@@ -8,3 +8,7 @@ train.py (e.g. python3 train.py app:apps/mobilenet_v1_config.yml)
 
 for Multi-GPU training
 new_train.py (e.g. CUDA_VISIBLE_CUDA=NUMBER_OF_GPUS new_train.py app:apps/mobilenet_v1_config.yml)
+
+
+## XNNPACK covert
+'xnnpack_experiment.py' will convert model file to xnnpack end-to-end code  
